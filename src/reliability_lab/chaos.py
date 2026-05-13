@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import random
+import re
 from pathlib import Path
 
 from reliability_lab.cache import ResponseCache, SharedRedisCache
@@ -44,6 +45,9 @@ def build_gateway(config: LabConfig, provider_overrides: dict[str, float] | None
                 config.cache.ttl_seconds,
                 config.cache.similarity_threshold,
             )
+            if not cache.ping():
+                cache.close()
+                cache = ResponseCache(config.cache.ttl_seconds, config.cache.similarity_threshold)
         else:
             cache = ResponseCache(config.cache.ttl_seconds, config.cache.similarity_threshold)
     return ReliabilityGateway(providers, breakers, cache)
@@ -59,8 +63,8 @@ def calculate_recovery_time_ms(gateway: ReliabilityGateway) -> float | None:
     for breaker in gateway.breakers.values():
         open_ts: float | None = None
         for entry in breaker.transition_log:
-            if entry["to"] == "open" and open_ts is None:
-                open_ts = entry["ts"]
+            if entry["to"] == "open":
+                open_ts = float(entry["ts"])
             elif entry["to"] == "closed" and open_ts is not None:
                 recovery_times.append((float(entry["ts"]) - open_ts) * 1000)
                 open_ts = None
@@ -69,20 +73,66 @@ def calculate_recovery_time_ms(gateway: ReliabilityGateway) -> float | None:
     return sum(recovery_times) / len(recovery_times)
 
 
+def _scenario_config(config: LabConfig, scenario: ScenarioConfig) -> LabConfig:
+    scenario_config = copy.deepcopy(config)
+    if scenario.name == "cache_stale_candidate":
+        scenario_config.cache.enabled = True
+        scenario_config.cache.similarity_threshold = min(scenario_config.cache.similarity_threshold, 0.3)
+    return scenario_config
+
+
+def _scenario_prompts(queries: list[str], scenario: ScenarioConfig, request_count: int) -> list[str]:
+    if scenario.name in {"primary_timeout_100", "primary_flaky_50"}:
+        return [f"{queries[index % len(queries)]} [scenario:{scenario.name} req:{index}]" for index in range(request_count)]
+    if scenario.name == "cache_stale_candidate":
+        risky_pair = [
+            "Summarize refund policy for 2024 deadline",
+            "Summarize refund policy for 2026 deadline",
+        ]
+        return [risky_pair[index % len(risky_pair)] for index in range(request_count)]
+    return [random.choice(queries) for _ in range(request_count)]
+
+
+def _cache_false_hit(prompt: str, response_text: str) -> bool:
+    prompt_years = set(re.findall(r"\b\d{4}\b", prompt))
+    response_years = set(re.findall(r"\b\d{4}\b", response_text))
+    return bool(prompt_years and response_years and prompt_years != response_years)
+
+
+def _scenario_passed(scenario: ScenarioConfig, metrics: RunMetrics) -> bool:
+    if scenario.name == "primary_timeout_100":
+        return metrics.circuit_open_count >= 1 and metrics.fallback_success_rate >= 0.95 and metrics.failed_requests == 0
+    if scenario.name == "primary_flaky_50":
+        return (
+            metrics.circuit_open_count >= 1
+            and metrics.primary_successes > 0
+            and metrics.fallback_successes > 0
+            and metrics.recovery_time_ms is not None
+        )
+    if scenario.name == "cache_stale_candidate":
+        return metrics.cache_hit_rate > 0.0 and metrics.cache_false_hits == 0
+    return metrics.successful_requests > 0
+
+
 def run_scenario(config: LabConfig, queries: list[str], scenario: ScenarioConfig) -> RunMetrics:
     """Run a single named chaos scenario."""
-    gateway = build_gateway(config, scenario.provider_overrides or None)
+    scenario_config = _scenario_config(config, scenario)
+    gateway = build_gateway(scenario_config, scenario.provider_overrides or None)
+    if isinstance(gateway.cache, SharedRedisCache):
+        gateway.cache.flush()
+
     metrics = RunMetrics()
-    request_count = config.load_test.requests
-    for _ in range(request_count):
-        prompt = random.choice(queries)
+    prompts = _scenario_prompts(queries, scenario, scenario_config.load_test.requests)
+    for prompt in prompts:
         result = gateway.complete(prompt)
         metrics.total_requests += 1
         metrics.estimated_cost += result.estimated_cost
         if result.cache_hit:
             metrics.cache_hits += 1
             metrics.estimated_cost_saved += 0.001
-        if result.route == "fallback":
+            if _cache_false_hit(prompt, result.text):
+                metrics.cache_false_hits += 1
+        if result.route.startswith("fallback:"):
             metrics.fallback_successes += 1
             metrics.successful_requests += 1
         elif result.route == "static_fallback":
@@ -90,6 +140,8 @@ def run_scenario(config: LabConfig, queries: list[str], scenario: ScenarioConfig
             metrics.failed_requests += 1
         else:
             metrics.successful_requests += 1
+            if result.route.startswith("primary:"):
+                metrics.primary_successes += 1
         if result.latency_ms:
             metrics.latencies_ms.append(result.latency_ms)
 
@@ -97,6 +149,8 @@ def run_scenario(config: LabConfig, queries: list[str], scenario: ScenarioConfig
         1 for breaker in gateway.breakers.values() for t in breaker.transition_log if t["to"] == "open"
     )
     metrics.recovery_time_ms = calculate_recovery_time_ms(gateway)
+    if isinstance(gateway.cache, SharedRedisCache):
+        gateway.cache.close()
     return metrics
 
 
@@ -116,17 +170,17 @@ def run_simulation(config: LabConfig, queries: list[str]) -> RunMetrics:
     for scenario in config.scenarios:
         result = run_scenario(config, queries, scenario)
 
-        # TODO(student): Define pass/fail criteria per scenario.
-        # Example: primary_timeout_100 passes if fallback_success_rate > 0.9
-        passed = result.successful_requests > 0
+        passed = _scenario_passed(scenario, result)
         combined.scenarios[scenario.name] = "pass" if passed else "fail"
 
         combined.total_requests += result.total_requests
         combined.successful_requests += result.successful_requests
         combined.failed_requests += result.failed_requests
+        combined.primary_successes += result.primary_successes
         combined.fallback_successes += result.fallback_successes
         combined.static_fallbacks += result.static_fallbacks
         combined.cache_hits += result.cache_hits
+        combined.cache_false_hits += result.cache_false_hits
         combined.circuit_open_count += result.circuit_open_count
         combined.estimated_cost += result.estimated_cost
         combined.estimated_cost_saved += result.estimated_cost_saved

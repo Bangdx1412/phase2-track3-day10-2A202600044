@@ -12,9 +12,11 @@ class RunMetrics(BaseModel):
     total_requests: int = 0
     successful_requests: int = 0
     failed_requests: int = 0
+    primary_successes: int = 0
     fallback_successes: int = 0
     static_fallbacks: int = 0
     cache_hits: int = 0
+    cache_false_hits: int = 0
     circuit_open_count: int = 0
     recovery_time_ms: float | None = None
     estimated_cost: float = 0.0

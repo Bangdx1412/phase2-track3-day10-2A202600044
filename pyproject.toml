@@ -27,3 +27,4 @@ src = ["src", "tests", "scripts"]
 python_version = "3.10"
 strict = true
 mypy_path = "src"
+sqlite_cache = false

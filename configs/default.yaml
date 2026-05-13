@@ -13,24 +13,25 @@ circuit_breaker:
   success_threshold: 1
 cache:
   enabled: true
-  backend: memory          # "memory" (default) or "redis" (requires docker compose up -d)
+  backend: redis           # falls back to memory if Redis is unavailable
   ttl_seconds: 300
   similarity_threshold: 0.92
   redis_url: "redis://localhost:6379/0"
 load_test:
-  requests: 100
+  requests: 200
 
 # Chaos scenarios: each overrides provider fail_rate for targeted testing.
-# TODO(student): Add more scenarios or tweak these.
 scenarios:
   - name: primary_timeout_100
-    description: "Primary provider fails 100% — all traffic should fallback"
+    description: "Primary provider fails 100% and all traffic should fall back"
     provider_overrides:
       primary: 1.0
+      backup: 0.0
   - name: primary_flaky_50
-    description: "Primary provider fails 50% — circuit should oscillate"
+    description: "Primary provider fails 50% and should recover after circuit probes"
     provider_overrides:
       primary: 0.5
-  - name: all_healthy
-    description: "Baseline — both providers healthy"
+      backup: 0.0
+  - name: cache_stale_candidate
+    description: "Low-threshold cache run to surface stale cache candidates"
     provider_overrides: {}

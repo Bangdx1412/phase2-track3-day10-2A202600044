@@ -13,3 +13,5 @@ def test_scenarios_loaded() -> None:
     assert len(config.scenarios) >= 2
     names = [s.name for s in config.scenarios]
     assert "primary_timeout_100" in names
+    assert "primary_flaky_50" in names
+    assert "cache_stale_candidate" in names

@@ -1,8 +1,38 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
 .venv/
+venv/
+env/
+
+# Python caches and build outputs
 __pycache__/
+*.py[cod]
+*$py.class
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
-*.pyc
-reports/metrics.json
-reports/final_report.md
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Local temp/cache folders
+.tmp/
+pytest-cache-files-*/
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Docker/runtime local state
+*.log
+dump.rdb
+
+# Keep final lab deliverables tracked:
+# reports/metrics.json
+# reports/final_report.md
